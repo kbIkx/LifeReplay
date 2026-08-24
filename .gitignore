@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+
+# Runtime logs
+logs/
+
+# Generated replays
+replays/
+storage/replays/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

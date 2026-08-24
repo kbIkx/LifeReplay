@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>LifeReplay</title>
+
+</head>
+
+<body>
+
+    <h1>LifeReplay</h1>
+
+    <p id="status">
+        Загрузка...
+    </p>
+
+    <h2>Replay</h2>
+
+    <div id="replays">
+        Загрузка replay...
+    </div>
+
+    <script>
+
+        async function loadReplays() {
+
+            const response = await fetch(
+                "/api/replays"
+            );
+
+            const replays = await response.json();
+
+            const container =
+                document.getElementById(
+                    "replays"
+                );
+
+            container.innerHTML = "";
+
+            if (replays.length === 0) {
+
+                container.innerHTML =
+                    "<p>Replay пока нет</p>";
+
+                return;
+            }
+
+            for (const replay of replays) {
+
+                const item =
+                    document.createElement(
+                        "div"
+                    );
+
+                item.innerHTML = `
+                    <p>
+                        <strong>
+                            ${replay.id}
+                        </strong>
+                    </p>
+
+                    <p>
+                        Кадров:
+                        ${replay.frame_count}
+                    </p>
+
+                    <p>
+                        Длительность:
+                        ${replay.duration_seconds}
+                        сек.
+                    </p>
+
+                    <button
+                        onclick="
+                            deleteReplay(
+                                '${replay.id}'
+                            )
+                        "
+                    >
+                        Удалить
+                    </button>
+
+                    <hr>
+                `;
+
+                container.appendChild(
+                    item
+                );
+            }
+        }
+
+
+        async function deleteReplay(
+            replayId
+        ) {
+
+            const response =
+                await fetch(
+                    `/api/replays/${replayId}`,
+                    {
+                        method: "DELETE"
+                    }
+                );
+
+            if (response.ok) {
+
+                await loadReplays();
+
+            } else {
+
+                alert(
+                    "Не удалось удалить replay"
+                );
+            }
+        }
+
+
+        async function checkStatus() {
+
+            const response =
+                await fetch("/");
+
+            const data =
+                await response.json();
+
+            document.getElementById(
+                "status"
+            ).textContent =
+                `Статус: ${data.status}`;
+        }
+
+
+        checkStatus();
+
+        loadReplays();
+
+    </script>
+
+</body>
+
+</html>
