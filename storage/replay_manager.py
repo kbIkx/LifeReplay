@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import subprocess
 
 import cv2
 import numpy as np
@@ -16,6 +17,10 @@ class ReplayManager:
 
         self.replay_path = (
             Config.REPLAY_PATH
+        )
+
+        self.ffmpeg_path = (
+            "/usr/bin/ffmpeg"
         )
 
         os.makedirs(
@@ -51,6 +56,180 @@ class ReplayManager:
 
             return None
 
+    def _write_mp4(
+        self,
+        file_path,
+        pre_frames,
+        post_frames,
+        width,
+        height,
+        fps
+    ):
+        command = [
+            self.ffmpeg_path,
+
+            "-y",
+
+            "-f",
+            "rawvideo",
+
+            "-vcodec",
+            "rawvideo",
+
+            "-pix_fmt",
+            "bgr24",
+
+            "-s",
+            f"{width}x{height}",
+
+            "-r",
+            str(fps),
+
+            "-i",
+            "-",
+
+            "-an",
+
+            "-c:v",
+            "libx264",
+
+            "-preset",
+            "veryfast",
+
+            "-crf",
+            "23",
+
+            "-pix_fmt",
+            "yuv420p",
+
+            "-movflags",
+            "+faststart",
+
+            file_path
+        ]
+
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE
+            )
+
+        except Exception as error:
+            self.logger.error(
+                f"Failed to start FFmpeg: "
+                f"{error}"
+            )
+
+            return 0, len(pre_frames) + len(post_frames)
+
+        written_frame_count = 0
+        failed_frame_count = 0
+
+        try:
+            all_frames = (
+                list(pre_frames)
+                + list(post_frames)
+            )
+
+            for encoded_frame in all_frames:
+                frame = self._decode_frame(
+                    encoded_frame
+                )
+
+                if frame is None:
+                    failed_frame_count += 1
+                    continue
+
+                if (
+                    frame.shape[1] != width
+                    or frame.shape[0] != height
+                ):
+                    self.logger.warning(
+                        "Skipping frame with "
+                        "unexpected resolution"
+                    )
+
+                    failed_frame_count += 1
+                    continue
+
+                try:
+                    process.stdin.write(
+                        frame.tobytes()
+                    )
+
+                    written_frame_count += 1
+
+                except (
+                    BrokenPipeError,
+                    OSError
+                ):
+                    failed_frame_count += 1
+
+                    self.logger.error(
+                        "FFmpeg pipe closed "
+                        "unexpectedly"
+                    )
+
+                    break
+
+        finally:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+
+        stderr_output = (
+            process.stderr.read()
+            if process.stderr is not None
+            else b""
+        )
+
+        return_code = (
+            process.wait()
+        )
+
+        if return_code != 0:
+            error_text = (
+                stderr_output
+                .decode(
+                    "utf-8",
+                    errors="replace"
+                )
+            )
+
+            self.logger.error(
+                f"FFmpeg failed with "
+                f"exit code {return_code}"
+            )
+
+            self.logger.error(
+                f"FFmpeg output: "
+                f"{error_text[-4000:]}"
+            )
+
+            if os.path.isfile(
+                file_path
+            ):
+                try:
+                    os.remove(
+                        file_path
+                    )
+                except OSError:
+                    pass
+
+            return (
+                0,
+                len(pre_frames) + len(post_frames)
+            )
+
+        return (
+            written_frame_count,
+            failed_frame_count
+        )
+
     def save_encoded_replay(
         self,
         pre_frames,
@@ -77,7 +256,7 @@ class ReplayManager:
         )
 
         filename = (
-            f"replay_{replay_id}.avi"
+            f"replay_{replay_id}.mp4"
         )
 
         file_path = os.path.join(
@@ -104,7 +283,8 @@ class ReplayManager:
 
         if first_frame is None:
             self.logger.error(
-                "Failed to decode first replay frame"
+                "Failed to decode first "
+                "replay frame"
             )
 
             return None
@@ -115,70 +295,51 @@ class ReplayManager:
 
         fps = Config.CAMERA_FPS
 
-        fourcc = (
-            cv2.VideoWriter_fourcc(
-                *"MJPG"
-            )
-        )
-
-        writer = cv2.VideoWriter(
-            file_path,
-            fourcc,
-            fps,
-            (width, height)
-        )
-
-        if not writer.isOpened():
+        if fps <= 0:
             self.logger.error(
-                "Failed to open video writer"
+                f"Invalid camera FPS: {fps}"
             )
 
             return None
 
-        written_frame_count = 0
-        failed_frame_count = 0
+        self.logger.info(
+            f"Starting MP4 encoding: "
+            f"{file_path}"
+        )
 
-        try:
-            for encoded_frame in (
-                pre_frames
-            ):
-                frame = (
-                    self._decode_frame(
-                        encoded_frame
-                    )
-                )
+        self.logger.info(
+            f"Video parameters: "
+            f"{width}x{height} @ {fps} FPS"
+        )
 
-                if frame is None:
-                    failed_frame_count += 1
-                    continue
+        (
+            written_frame_count,
+            failed_frame_count
+        ) = self._write_mp4(
+            file_path=file_path,
+            pre_frames=pre_frames,
+            post_frames=post_frames,
+            width=width,
+            height=height,
+            fps=fps
+        )
 
-                writer.write(
-                    frame
-                )
+        if written_frame_count == 0:
+            self.logger.error(
+                "No frames were written "
+                "to MP4"
+            )
 
-                written_frame_count += 1
+            return None
 
-            for encoded_frame in (
-                post_frames
-            ):
-                frame = (
-                    self._decode_frame(
-                        encoded_frame
-                    )
-                )
+        if not os.path.isfile(
+            file_path
+        ):
+            self.logger.error(
+                "MP4 file was not created"
+            )
 
-                if frame is None:
-                    failed_frame_count += 1
-                    continue
-
-                writer.write(
-                    frame
-                )
-
-                written_frame_count += 1
-
-        finally:
-            writer.release()
+            return None
 
         replay = Replay(
             replay_id=replay_id,
@@ -202,6 +363,11 @@ class ReplayManager:
             f"expected={expected_frame_count}, "
             f"written={written_frame_count}, "
             f"failed={failed_frame_count}"
+        )
+
+        self.logger.info(
+            f"Replay duration: "
+            f"{replay.duration_seconds:.2f} seconds"
         )
 
         return replay
@@ -250,26 +416,27 @@ class ReplayManager:
             post_seconds
         )
 
-    def list_replays(self):
-        replays = []
-
+    def _get_replay_files(
+        self
+    ):
         if not os.path.exists(
             self.replay_path
         ):
-            return replays
+            return []
 
-        for filename in sorted(
-            os.listdir(
-                self.replay_path
-            )
+        replay_files = []
+
+        for filename in os.listdir(
+            self.replay_path
         ):
             if not filename.startswith(
                 "replay_"
             ):
                 continue
 
-            if not filename.endswith(
-                ".avi"
+            if not (
+                filename.endswith(".mp4")
+                or filename.endswith(".avi")
             ):
                 continue
 
@@ -283,9 +450,38 @@ class ReplayManager:
             ):
                 continue
 
+            replay_files.append(
+                filename
+            )
+
+        return sorted(
+            replay_files,
+            reverse=True
+        )
+
+    def list_replays(self):
+        replays = []
+
+        replay_files = (
+            self._get_replay_files()
+        )
+
+        for filename in replay_files:
+            if filename.endswith(
+                ".mp4"
+            ):
+                extension_length = 4
+            else:
+                extension_length = 4
+
             replay_id = filename[
-                7:-4
+                7:-extension_length
             ]
+
+            file_path = os.path.join(
+                self.replay_path,
+                filename
+            )
 
             created_at = (
                 os.path.getmtime(
@@ -294,23 +490,52 @@ class ReplayManager:
             )
 
             frame_count = 0
+            fps = Config.CAMERA_FPS
 
             capture = cv2.VideoCapture(
                 file_path
             )
 
             if capture.isOpened():
-                while True:
-                    success, _ = (
-                        capture.read()
+                detected_fps = (
+                    capture.get(
+                        cv2.CAP_PROP_FPS
+                    )
+                )
+
+                if detected_fps > 0:
+                    fps = detected_fps
+
+                detected_frame_count = (
+                    capture.get(
+                        cv2.CAP_PROP_FRAME_COUNT
+                    )
+                )
+
+                if detected_frame_count > 0:
+                    frame_count = int(
+                        detected_frame_count
                     )
 
-                    if not success:
-                        break
-
-                    frame_count += 1
-
             capture.release()
+
+            if frame_count <= 0:
+                capture = cv2.VideoCapture(
+                    file_path
+                )
+
+                if capture.isOpened():
+                    while True:
+                        success, _ = (
+                            capture.read()
+                        )
+
+                        if not success:
+                            break
+
+                        frame_count += 1
+
+                capture.release()
 
             replay = Replay(
                 replay_id=replay_id,
@@ -319,8 +544,9 @@ class ReplayManager:
                 post_seconds=Config.POST_SECONDS,
                 frame_count=frame_count,
                 duration_seconds=(
-                    frame_count
-                    / Config.CAMERA_FPS
+                    frame_count / fps
+                    if fps > 0
+                    else 0
                 ),
                 file_path=file_path
             )
@@ -335,18 +561,35 @@ class ReplayManager:
         self,
         replay_id
     ):
-        filename = (
+        mp4_filename = (
+            f"replay_{replay_id}.mp4"
+        )
+
+        avi_filename = (
             f"replay_{replay_id}.avi"
         )
 
-        file_path = os.path.join(
+        mp4_path = os.path.join(
             self.replay_path,
-            filename
+            mp4_filename
         )
 
-        if not os.path.isfile(
-            file_path
+        avi_path = os.path.join(
+            self.replay_path,
+            avi_filename
+        )
+
+        if os.path.isfile(
+            mp4_path
         ):
+            file_path = mp4_path
+
+        elif os.path.isfile(
+            avi_path
+        ):
+            file_path = avi_path
+
+        else:
             self.logger.warning(
                 f"Replay not found: "
                 f"{replay_id}"
@@ -395,18 +638,37 @@ class ReplayManager:
         self,
         replay_id
     ):
-        filename = (
+        mp4_filename = (
+            f"replay_{replay_id}.mp4"
+        )
+
+        avi_filename = (
             f"replay_{replay_id}.avi"
         )
 
-        file_path = os.path.join(
+        mp4_path = os.path.join(
             self.replay_path,
-            filename
+            mp4_filename
         )
 
-        if not os.path.isfile(
-            file_path
+        avi_path = os.path.join(
+            self.replay_path,
+            avi_filename
+        )
+
+        file_path = None
+
+        if os.path.isfile(
+            mp4_path
         ):
+            file_path = mp4_path
+
+        elif os.path.isfile(
+            avi_path
+        ):
+            file_path = avi_path
+
+        else:
             self.logger.warning(
                 f"Replay not found: "
                 f"{replay_id}"

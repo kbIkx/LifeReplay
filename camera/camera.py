@@ -1,4 +1,5 @@
 import cv2
+from picamera2 import Picamera2
 
 from config.config import Config
 from core.logger import Logger
@@ -7,69 +8,77 @@ from core.logger import Logger
 class Camera:
     def __init__(self):
         self.logger = Logger()
-
         self.camera = None
 
     def start(self):
         if self.camera is not None:
             return
 
-        self.camera = cv2.VideoCapture(
-            Config.CAMERA_INDEX
-        )
+        try:
+            self.camera = Picamera2()
 
-        self.camera.set(
-            cv2.CAP_PROP_FRAME_WIDTH,
-            Config.CAMERA_WIDTH
-        )
-
-        self.camera.set(
-            cv2.CAP_PROP_FRAME_HEIGHT,
-            Config.CAMERA_HEIGHT
-        )
-
-        self.camera.set(
-            cv2.CAP_PROP_FPS,
-            Config.CAMERA_FPS
-        )
-
-        if not self.camera.isOpened():
-            self.logger.error(
-                "Camera failed to open"
+            config = self.camera.create_video_configuration(
+                main={
+                    "size": (
+                        Config.CAMERA_WIDTH,
+                        Config.CAMERA_HEIGHT
+                    ),
+                    "format": "RGB888"
+                }
             )
 
-            self.camera.release()
+            self.camera.configure(config)
+            self.camera.start()
+
+            self.logger.info(
+                "Camera started: "
+                f"{Config.CAMERA_WIDTH}x"
+                f"{Config.CAMERA_HEIGHT} @ "
+                f"{Config.CAMERA_FPS} FPS"
+            )
+
+        except Exception as error:
+            self.logger.error(
+                f"Camera failed to start: {error}"
+            )
+
             self.camera = None
 
-            raise Exception(
-                "Camera not found"
-            )
-
-        self.logger.info(
-            "Camera started"
-        )
+            raise
 
     def read(self):
         if self.camera is None:
             return None
 
-        success, frame = self.camera.read()
+        try:
+            frame = self.camera.capture_array()
 
-        if not success:
+            # Picamera2 gives RGB, OpenCV expects BGR.
+            frame = cv2.cvtColor(
+                frame,
+                cv2.COLOR_RGB2BGR
+            )
+
+            return frame
+
+        except Exception as error:
             self.logger.warning(
-                "Failed to read frame"
+                f"Failed to read frame: {error}"
             )
 
             return None
 
-        return frame
+    def stop(self):
+        if self.camera is not None:
+            try:
+                self.camera.stop()
+            finally:
+                self.camera.close()
+                self.camera = None
+
+                self.logger.info(
+                    "Camera stopped"
+                )
 
     def release(self):
-        if self.camera is not None:
-            self.camera.release()
-
-            self.camera = None
-
-            self.logger.info(
-                "Camera released"
-            )
+        self.stop()

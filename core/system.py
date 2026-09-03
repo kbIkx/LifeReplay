@@ -8,7 +8,7 @@ from core.logger import Logger
 from storage.replay_buffer import ReplayBuffer
 from storage.replay_manager import ReplayManager
 
-from camera.fake_camera import FakeCamera
+from camera.camera import Camera
 from input.button import Button
 from hardware.gpio import GPIOHardware
 
@@ -25,7 +25,7 @@ class LifeReplaySystem:
             ReplayManager()
         )
 
-        self.camera = FakeCamera()
+        self.camera = Camera()
 
         self.button = Button()
 
