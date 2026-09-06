@@ -357,6 +357,17 @@ def main():
     except OSError:
         pass
 
+    metadata_path = (
+        Path(Config.REPLAY_PATH)
+        / "metadata"
+        / f"{replay.replay_id}.json"
+    )
+
+    try:
+        metadata_path.unlink()
+    except OSError:
+        pass
+
 
 if __name__ == "__main__":
     main()

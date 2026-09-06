@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+import json
 import time
 import uuid
 import subprocess
@@ -28,6 +30,171 @@ class ReplayManager:
         os.makedirs(
             self.replay_path,
             exist_ok=True
+        )
+
+        self.metadata_path = os.path.join(
+            self.replay_path,
+            "metadata"
+        )
+
+        os.makedirs(
+            self.metadata_path,
+            exist_ok=True
+        )
+
+    def _metadata_file_path(
+        self,
+        replay_id
+    ):
+        return os.path.join(
+            self.metadata_path,
+            f"{replay_id}.json"
+        )
+
+    def _save_metadata(
+        self,
+        replay
+    ):
+        metadata = {
+            "id": replay.replay_id,
+            "created_at": replay.created_at,
+            "duration_seconds": replay.duration_seconds,
+            "file_size_bytes": replay.file_size_bytes,
+            "pre_seconds": replay.pre_seconds,
+            "post_seconds": replay.post_seconds,
+            "width": replay.width,
+            "height": replay.height,
+            "fps": replay.fps,
+            "frame_count": replay.frame_count,
+            "audio": replay.audio,
+            "audio_sample_rate": replay.audio_sample_rate,
+            "audio_channels": replay.audio_channels,
+            "file_path": replay.file_path
+        }
+
+        metadata_file = self._metadata_file_path(
+            replay.replay_id
+        )
+
+        try:
+            with open(
+                metadata_file,
+                "w",
+                encoding="utf-8"
+            ) as file:
+                json.dump(
+                    metadata,
+                    file,
+                    indent=4
+                )
+
+            self.logger.info(
+                f"Replay metadata saved: "
+                f"{metadata_file}"
+            )
+
+            return True
+
+        except Exception as error:
+            self.logger.error(
+                f"Failed to save replay metadata: "
+                f"{error}"
+            )
+
+            return False
+
+    def _load_metadata(
+        self,
+        replay_id
+    ):
+        metadata_file = self._metadata_file_path(
+            replay_id
+        )
+
+        if not os.path.isfile(
+            metadata_file
+        ):
+            return None
+
+        try:
+            with open(
+                metadata_file,
+                "r",
+                encoding="utf-8"
+            ) as file:
+                return json.load(file)
+
+        except Exception as error:
+            self.logger.warning(
+                f"Failed to load replay metadata "
+                f"{replay_id}: {error}"
+            )
+
+            return None
+
+    def _create_replay_from_metadata(
+        self,
+        metadata,
+        file_path
+    ):
+        return Replay(
+            replay_id=metadata.get(
+                "id",
+                Path(file_path).stem.replace(
+                    "replay_",
+                    "",
+                    1
+                )
+            ),
+            created_at=metadata.get(
+                "created_at",
+                os.path.getmtime(file_path)
+            ),
+            pre_seconds=metadata.get(
+                "pre_seconds",
+                Config.PRE_SECONDS
+            ),
+            post_seconds=metadata.get(
+                "post_seconds",
+                Config.POST_SECONDS
+            ),
+            frame_count=metadata.get(
+                "frame_count",
+                0
+            ),
+            duration_seconds=metadata.get(
+                "duration_seconds",
+                0.0
+            ),
+            file_path=file_path,
+            file_size_bytes=metadata.get(
+                "file_size_bytes",
+                os.path.getsize(file_path)
+            ),
+            width=metadata.get(
+                "width",
+                0
+            ),
+            height=metadata.get(
+                "height",
+                0
+            ),
+            fps=metadata.get(
+                "fps",
+                0.0
+            ),
+            audio=metadata.get(
+                "audio",
+                False
+            ),
+            audio_sample_rate=metadata.get(
+                "audio_sample_rate",
+                0
+            ),
+            audio_channels=metadata.get(
+                "audio_channels",
+                0
+            )
         )
 
     def _decode_frame(
@@ -618,7 +785,20 @@ class ReplayManager:
                 written_frame_count
                 / fps
             ),
-            file_path=file_path
+            file_path=file_path,
+            file_size_bytes=os.path.getsize(
+                file_path
+            ),
+            width=width,
+            height=height,
+            fps=fps,
+            audio=False,
+            audio_sample_rate=0,
+            audio_channels=0
+        )
+
+        self._save_metadata(
+            replay
         )
 
         self.logger.info(
@@ -783,7 +963,20 @@ class ReplayManager:
                 written_frame_count
                 / fps
             ),
-            file_path=file_path
+            file_path=file_path,
+            file_size_bytes=os.path.getsize(
+                file_path
+            ),
+            width=width,
+            height=height,
+            fps=fps,
+            audio=True,
+            audio_sample_rate=16000,
+            audio_channels=1
+        )
+
+        self._save_metadata(
+            replay
         )
 
         self.logger.info(
@@ -916,6 +1109,20 @@ class ReplayManager:
                 filename
             )
 
+            metadata = self._load_metadata(
+                replay_id
+            )
+
+            if metadata is not None:
+                replays.append(
+                    self._create_replay_from_metadata(
+                        metadata,
+                        file_path
+                    )
+                )
+
+                continue
+
             created_at = (
                 os.path.getmtime(
                     file_path
@@ -924,6 +1131,11 @@ class ReplayManager:
 
             frame_count = 0
             fps = Config.CAMERA_FPS
+            width = 0
+            height = 0
+            audio = False
+            audio_sample_rate = 0
+            audio_channels = 0
 
             capture = cv2.VideoCapture(
                 file_path
@@ -950,25 +1162,19 @@ class ReplayManager:
                         detected_frame_count
                     )
 
-            capture.release()
-
-            if frame_count <= 0:
-                capture = cv2.VideoCapture(
-                    file_path
+                width = int(
+                    capture.get(
+                        cv2.CAP_PROP_FRAME_WIDTH
+                    )
                 )
 
-                if capture.isOpened():
-                    while True:
-                        success, _ = (
-                            capture.read()
-                        )
+                height = int(
+                    capture.get(
+                        cv2.CAP_PROP_FRAME_HEIGHT
+                    )
+                )
 
-                        if not success:
-                            break
-
-                        frame_count += 1
-
-                capture.release()
+            capture.release()
 
             replay = Replay(
                 replay_id=replay_id,
@@ -981,10 +1187,23 @@ class ReplayManager:
                     if fps > 0
                     else 0
                 ),
-                file_path=file_path
+                file_path=file_path,
+                file_size_bytes=os.path.getsize(
+                    file_path
+                ),
+                width=width,
+                height=height,
+                fps=fps,
+                audio=audio,
+                audio_sample_rate=audio_sample_rate,
+                audio_channels=audio_channels
             )
 
             replays.append(
+                replay
+            )
+
+            self._save_metadata(
                 replay
             )
 

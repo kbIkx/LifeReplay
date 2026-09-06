@@ -86,6 +86,19 @@ def get_replays():
                 "frame_count": replay.frame_count,
                 "duration_seconds": (
                     replay.duration_seconds
+                ),
+                "file_size_bytes": (
+                    replay.file_size_bytes
+                ),
+                "width": replay.width,
+                "height": replay.height,
+                "fps": replay.fps,
+                "audio": replay.audio,
+                "audio_sample_rate": (
+                    replay.audio_sample_rate
+                ),
+                "audio_channels": (
+                    replay.audio_channels
                 )
             }
         )
