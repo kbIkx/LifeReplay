@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 import subprocess
+import tempfile
 
 import cv2
 import numpy as np
@@ -9,6 +10,7 @@ import numpy as np
 from config.config import Config
 from core.logger import Logger
 from storage.replay import Replay
+from audio.wav_writer import WavWriter
 
 
 class ReplayManager:
@@ -67,7 +69,6 @@ class ReplayManager:
     ):
         command = [
             self.ffmpeg_path,
-
             "-y",
 
             "-f",
@@ -122,7 +123,10 @@ class ReplayManager:
                 f"{error}"
             )
 
-            return 0, len(pre_frames) + len(post_frames)
+            return (
+                0,
+                len(pre_frames) + len(post_frames)
+            )
 
         written_frame_count = 0
         failed_frame_count = 0
@@ -229,6 +233,269 @@ class ReplayManager:
             written_frame_count,
             failed_frame_count
         )
+
+    def _write_mp4_with_audio(
+        self,
+        file_path,
+        pre_frames,
+        post_frames,
+        pre_audio_chunks,
+        post_audio_chunks,
+        width,
+        height,
+        fps
+    ):
+        all_audio_chunks = (
+            list(pre_audio_chunks)
+            + list(post_audio_chunks)
+        )
+
+        if not all_audio_chunks:
+            self.logger.error(
+                "Cannot create A/V replay "
+                "without audio chunks"
+            )
+
+            return (
+                0,
+                len(pre_frames) + len(post_frames)
+            )
+
+        temp_wav_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav",
+                delete=False
+            ) as temp_file:
+                temp_wav_path = (
+                    temp_file.name
+                )
+
+            wav_ok = WavWriter.write(
+                temp_wav_path,
+                all_audio_chunks,
+                sample_rate=16000,
+                channels=1,
+                sample_width=2
+            )
+
+            if not wav_ok:
+                self.logger.error(
+                    "Failed to create "
+                    "temporary WAV"
+                )
+
+                return (
+                    0,
+                    len(pre_frames) + len(post_frames)
+                )
+
+            command = [
+                self.ffmpeg_path,
+                "-y",
+
+                "-f",
+                "rawvideo",
+
+                "-vcodec",
+                "rawvideo",
+
+                "-pix_fmt",
+                "bgr24",
+
+                "-s",
+                f"{width}x{height}",
+
+                "-r",
+                str(fps),
+
+                "-i",
+                "-",
+
+                "-i",
+                temp_wav_path,
+
+                "-map",
+                "0:v:0",
+
+                "-map",
+                "1:a:0",
+
+                "-c:v",
+                "libx264",
+
+                "-preset",
+                "veryfast",
+
+                "-crf",
+                "23",
+
+                "-pix_fmt",
+                "yuv420p",
+
+                "-c:a",
+                "aac",
+
+                "-b:a",
+                "128k",
+
+                "-ar",
+                "16000",
+
+                "-ac",
+                "1",
+
+                "-shortest",
+
+                "-movflags",
+                "+faststart",
+
+                file_path
+            ]
+
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE
+                )
+
+            except Exception as error:
+                self.logger.error(
+                    f"Failed to start FFmpeg "
+                    f"A/V: {error}"
+                )
+
+                return (
+                    0,
+                    len(pre_frames) + len(post_frames)
+                )
+
+            written_frame_count = 0
+            failed_frame_count = 0
+
+            try:
+                all_frames = (
+                    list(pre_frames)
+                    + list(post_frames)
+                )
+
+                for encoded_frame in all_frames:
+                    frame = self._decode_frame(
+                        encoded_frame
+                    )
+
+                    if frame is None:
+                        failed_frame_count += 1
+                        continue
+
+                    if (
+                        frame.shape[1] != width
+                        or frame.shape[0] != height
+                    ):
+                        self.logger.warning(
+                            "Skipping frame with "
+                            "unexpected resolution"
+                        )
+
+                        failed_frame_count += 1
+                        continue
+
+                    try:
+                        process.stdin.write(
+                            frame.tobytes()
+                        )
+
+                        written_frame_count += 1
+
+                    except (
+                        BrokenPipeError,
+                        OSError
+                    ):
+                        failed_frame_count += 1
+
+                        self.logger.error(
+                            "FFmpeg A/V pipe "
+                            "closed unexpectedly"
+                        )
+
+                        break
+
+            finally:
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+
+            stderr_output = (
+                process.stderr.read()
+                if process.stderr is not None
+                else b""
+            )
+
+            return_code = (
+                process.wait()
+            )
+
+            if return_code != 0:
+                error_text = (
+                    stderr_output
+                    .decode(
+                        "utf-8",
+                        errors="replace"
+                    )
+                )
+
+                self.logger.error(
+                    f"FFmpeg A/V failed with "
+                    f"exit code {return_code}"
+                )
+
+                self.logger.error(
+                    f"FFmpeg A/V output: "
+                    f"{error_text[-4000:]}"
+                )
+
+                if os.path.isfile(
+                    file_path
+                ):
+                    try:
+                        os.remove(
+                            file_path
+                        )
+                    except OSError:
+                        pass
+
+                return (
+                    0,
+                    len(pre_frames) + len(post_frames)
+                )
+
+            return (
+                written_frame_count,
+                failed_frame_count
+            )
+
+        finally:
+            if (
+                temp_wav_path is not None
+                and os.path.isfile(
+                    temp_wav_path
+                )
+            ):
+                try:
+                    os.remove(
+                        temp_wav_path
+                    )
+                except OSError:
+                    self.logger.warning(
+                        f"Failed to remove "
+                        f"temporary WAV: "
+                        f"{temp_wav_path}"
+                    )
 
     def save_encoded_replay(
         self,
@@ -372,6 +639,177 @@ class ReplayManager:
 
         return replay
 
+    def save_encoded_av_replay(
+        self,
+        pre_frames,
+        post_frames,
+        pre_audio_chunks,
+        post_audio_chunks,
+        pre_seconds,
+        post_seconds
+    ):
+        if not pre_frames and not post_frames:
+            self.logger.warning(
+                "Cannot save empty A/V replay"
+            )
+
+            return None
+
+        if not pre_audio_chunks and not post_audio_chunks:
+            self.logger.warning(
+                "Cannot save A/V replay "
+                "without audio"
+            )
+
+            return None
+
+        replay_id = (
+            uuid.uuid4().hex[:12]
+        )
+
+        created_at = time.time()
+
+        expected_frame_count = (
+            len(pre_frames)
+            + len(post_frames)
+        )
+
+        expected_audio_chunk_count = (
+            len(pre_audio_chunks)
+            + len(post_audio_chunks)
+        )
+
+        filename = (
+            f"replay_{replay_id}.mp4"
+        )
+
+        file_path = os.path.join(
+            self.replay_path,
+            filename
+        )
+
+        first_encoded_frame = None
+
+        if pre_frames:
+            first_encoded_frame = (
+                pre_frames[0]
+            )
+        elif post_frames:
+            first_encoded_frame = (
+                post_frames[0]
+            )
+
+        first_frame = (
+            self._decode_frame(
+                first_encoded_frame
+            )
+        )
+
+        if first_frame is None:
+            self.logger.error(
+                "Failed to decode first "
+                "A/V replay frame"
+            )
+
+            return None
+
+        height, width = (
+            first_frame.shape[:2]
+        )
+
+        fps = Config.CAMERA_FPS
+
+        if fps <= 0:
+            self.logger.error(
+                f"Invalid camera FPS: {fps}"
+            )
+
+            return None
+
+        self.logger.info(
+            f"Starting A/V MP4 encoding: "
+            f"{file_path}"
+        )
+
+        self.logger.info(
+            f"Video parameters: "
+            f"{width}x{height} @ {fps} FPS"
+        )
+
+        self.logger.info(
+            f"Audio parameters: "
+            f"{expected_audio_chunk_count} chunks "
+            f"@ 16000 Hz mono"
+        )
+
+        (
+            written_frame_count,
+            failed_frame_count
+        ) = self._write_mp4_with_audio(
+            file_path=file_path,
+            pre_frames=pre_frames,
+            post_frames=post_frames,
+            pre_audio_chunks=pre_audio_chunks,
+            post_audio_chunks=post_audio_chunks,
+            width=width,
+            height=height,
+            fps=fps
+        )
+
+        if written_frame_count == 0:
+            self.logger.error(
+                "No frames were written "
+                "to A/V MP4"
+            )
+
+            return None
+
+        if not os.path.isfile(
+            file_path
+        ):
+            self.logger.error(
+                "A/V MP4 file was not created"
+            )
+
+            return None
+
+        replay = Replay(
+            replay_id=replay_id,
+            created_at=created_at,
+            pre_seconds=pre_seconds,
+            post_seconds=post_seconds,
+            frame_count=written_frame_count,
+            duration_seconds=(
+                written_frame_count
+                / fps
+            ),
+            file_path=file_path
+        )
+
+        self.logger.info(
+            f"A/V replay saved: "
+            f"{replay.file_path}"
+        )
+
+        self.logger.info(
+            f"A/V replay frames: "
+            f"expected={expected_frame_count}, "
+            f"written={written_frame_count}, "
+            f"failed={failed_frame_count}"
+        )
+
+        self.logger.info(
+            f"A/V replay audio chunks: "
+            f"{expected_audio_chunk_count}"
+        )
+
+        self.logger.info(
+            f"A/V replay duration: "
+            f"{replay.duration_seconds:.2f} seconds"
+        )
+
+        return replay
+
     def save_replay(
         self,
         frames,
@@ -467,12 +905,7 @@ class ReplayManager:
         )
 
         for filename in replay_files:
-            if filename.endswith(
-                ".mp4"
-            ):
-                extension_length = 4
-            else:
-                extension_length = 4
+            extension_length = 4
 
             replay_id = filename[
                 7:-extension_length
