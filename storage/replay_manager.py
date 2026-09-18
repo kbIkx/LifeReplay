@@ -262,7 +262,10 @@ class ReplayManager:
             "libx264",
 
             "-preset",
-            "veryfast",
+            "ultrafast",
+
+            "-threads",
+            "2",
 
             "-crf",
             "23",
@@ -463,18 +466,9 @@ class ReplayManager:
                 "-y",
 
                 "-f",
-                "rawvideo",
+                "mjpeg",
 
-                "-vcodec",
-                "rawvideo",
-
-                "-pix_fmt",
-                "bgr24",
-
-                "-s",
-                f"{width}x{height}",
-
-                "-r",
+                "-framerate",
                 str(fps),
 
                 "-i",
@@ -490,13 +484,7 @@ class ReplayManager:
                 "1:a:0",
 
                 "-c:v",
-                "libx264",
-
-                "-preset",
-                "veryfast",
-
-                "-crf",
-                "23",
+                "h264_v4l2m2m",
 
                 "-pix_fmt",
                 "yuv420p",
@@ -521,6 +509,11 @@ class ReplayManager:
                 file_path
             ]
 
+            self.logger.info(
+                "Using direct JPEG/MJPEG "
+                "FFmpeg input"
+            )
+
             try:
                 process = subprocess.Popen(
                     command,
@@ -543,36 +536,29 @@ class ReplayManager:
             written_frame_count = 0
             failed_frame_count = 0
 
+            pipe_time = 0.0
+
+            all_frames = (
+                list(pre_frames)
+                + list(post_frames)
+            )
+
             try:
-                all_frames = (
-                    list(pre_frames)
-                    + list(post_frames)
-                )
-
                 for encoded_frame in all_frames:
-                    frame = self._decode_frame(
-                        encoded_frame
-                    )
-
-                    if frame is None:
-                        failed_frame_count += 1
-                        continue
-
-                    if (
-                        frame.shape[1] != width
-                        or frame.shape[0] != height
-                    ):
-                        self.logger.warning(
-                            "Skipping frame with "
-                            "unexpected resolution"
-                        )
-
+                    if not encoded_frame:
                         failed_frame_count += 1
                         continue
 
                     try:
+                        pipe_start = time.perf_counter()
+
                         process.stdin.write(
-                            frame.tobytes()
+                            encoded_frame
+                        )
+
+                        pipe_time += (
+                            time.perf_counter()
+                            - pipe_start
                         )
 
                         written_frame_count += 1
@@ -584,7 +570,7 @@ class ReplayManager:
                         failed_frame_count += 1
 
                         self.logger.error(
-                            "FFmpeg A/V pipe "
+                            "FFmpeg A/V MJPEG pipe "
                             "closed unexpectedly"
                         )
 
@@ -597,6 +583,8 @@ class ReplayManager:
                     except OSError:
                         pass
 
+            finalize_start = time.perf_counter()
+
             stderr_output = (
                 process.stderr.read()
                 if process.stderr is not None
@@ -605,6 +593,17 @@ class ReplayManager:
 
             return_code = (
                 process.wait()
+            )
+
+            finalize_time = (
+                time.perf_counter()
+                - finalize_start
+            )
+
+            self.logger.info(
+                "A/V encoding profile: "
+                f"MJPEG pipe={pipe_time:.2f}s, "
+                f"finalize/wait={finalize_time:.2f}s"
             )
 
             if return_code != 0:

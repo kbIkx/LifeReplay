@@ -1,3 +1,6 @@
+from config.settings import load_settings
+
+
 class Config:
     # Camera
     CAMERA_INDEX = 0
@@ -25,5 +28,37 @@ class Config:
     GPIO_YELLOW_PIN = 22
     GPIO_RED_PIN = 24
 
-    # Reserved for future buzzer / physical signal
     GPIO_BUZZER_PIN = 23
+
+    @classmethod
+    def reload(cls):
+        settings = load_settings()
+
+        cls.CAMERA_WIDTH = settings[
+            "camera_width"
+        ]
+
+        cls.CAMERA_HEIGHT = settings[
+            "camera_height"
+        ]
+
+        cls.CAMERA_FPS = settings[
+            "camera_fps"
+        ]
+
+        cls.BUFFER_SECONDS = settings[
+            "buffer_seconds"
+        ]
+
+        cls.PRE_SECONDS = settings[
+            "pre_seconds"
+        ]
+
+        cls.POST_SECONDS = settings[
+            "post_seconds"
+        ]
+
+        return settings
+
+
+Config.reload()

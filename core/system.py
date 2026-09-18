@@ -1,16 +1,13 @@
+import threading
 import time
 
-import cv2
-
 from config.config import Config
+from config.settings import Settings
 from core.logger import Logger
-
 from storage.replay_buffer import ReplayBuffer
 from storage.replay_manager import ReplayManager
-
 from audio.fake_audio import FakeAudioSource
 from audio.audio_buffer import AudioBuffer
-
 from camera.camera import Camera
 from input.button import Button
 from hardware.gpio import GPIOHardware
@@ -19,6 +16,8 @@ from hardware.gpio import GPIOHardware
 class LifeReplaySystem:
     def __init__(self):
         self.logger = Logger()
+
+        Config.reload()
 
         self.buffer = ReplayBuffer(
             Config.BUFFER_SECONDS
@@ -34,14 +33,9 @@ class LifeReplaySystem:
             Config.BUFFER_SECONDS
         )
 
-        self.replay_manager = (
-            ReplayManager()
-        )
-
+        self.replay_manager = ReplayManager()
         self.camera = Camera()
-
         self.button = Button()
-
         self.hardware = GPIOHardware()
 
         self.running = False
@@ -50,52 +44,106 @@ class LifeReplaySystem:
         self.rollback_start_time = None
         self.event_timestamp = None
 
+        self.saving_replay = False
+
         self.pre_frames = []
         self.post_frames = []
-
         self.pre_audio_chunks = []
         self.post_audio_chunks = []
+
+        self.settings = Settings.load()
 
         self.logger.info(
             "LifeReplay system initialized"
         )
 
-    def encode_frame(
-        self,
-        frame
-    ):
-        if frame is None:
-            return None
+    def reload_settings(self):
+        new_settings = Settings.load()
 
-        success, encoded = cv2.imencode(
-            ".jpg",
-            frame,
-            [
-                cv2.IMWRITE_JPEG_QUALITY,
-                70
-            ]
+        if new_settings == self.settings:
+            return
+
+        # Don't apply settings in the middle of a rollback.
+        if self.rollback_active:
+            self.logger.info(
+                "Settings changed during rollback; "
+                "waiting for rollback to finish"
+            )
+            return
+
+        old_settings = self.settings
+
+        camera_changed = (
+            new_settings["camera_width"]
+            != old_settings["camera_width"]
+            or
+            new_settings["camera_height"]
+            != old_settings["camera_height"]
+            or
+            new_settings["camera_fps"]
+            != old_settings["camera_fps"]
         )
 
-        if not success:
-            self.logger.warning(
-                "Failed to encode frame"
+        buffer_changed = (
+            new_settings["buffer_seconds"]
+            != old_settings["buffer_seconds"]
+        )
+
+        Config.reload()
+
+        if buffer_changed:
+            old_buffer = self.buffer
+
+            self.buffer = ReplayBuffer(
+                Config.BUFFER_SECONDS
             )
 
-            return None
+            old_buffer.close()
 
-        return encoded.tobytes()
+            self.audio_buffer = AudioBuffer(
+                Config.BUFFER_SECONDS
+            )
+
+            self.logger.info(
+                "Replay buffers recreated: "
+                f"{Config.BUFFER_SECONDS}s"
+            )
+
+        if camera_changed and self.running:
+            try:
+                self.camera.restart()
+
+                self.audio_source.stop()
+
+                self.audio_source = FakeAudioSource(
+                    sample_rate=16000,
+                    channels=1,
+                    chunk_duration=(
+                        1.0 / Config.CAMERA_FPS
+                    )
+                )
+
+                self.audio_source.start()
+
+                self.logger.info(
+                    "Camera settings applied"
+                )
+
+            except Exception as error:
+                self.logger.error(
+                    f"Failed to apply camera settings: "
+                    f"{error}"
+                )
+
+        self.settings = new_settings
 
     def process_audio(self):
-        audio_result = (
-            self.audio_source.read()
-        )
+        audio_result = self.audio_source.read()
 
         if audio_result is None:
             return
 
-        timestamp, pcm_data = (
-            audio_result
-        )
+        timestamp, pcm_data = audio_result
 
         self.audio_buffer.add_chunk(
             timestamp,
@@ -104,50 +152,48 @@ class LifeReplaySystem:
 
         if self.rollback_active:
             self.post_audio_chunks.append(
-                (
-                    timestamp,
-                    pcm_data
-                )
+                (timestamp, pcm_data)
             )
 
-    def process_frame(
-        self,
-        frame
-    ):
-        self.buffer.add_frame(
-            frame
-        )
+    def process_frame(self, frame):
+        frame_timestamp = time.time()
+
+        if Settings.load().get(
+            "replay_buffer_enabled",
+            True
+        ):
+            self.buffer.add_frame(
+                frame,
+                frame_timestamp
+            )
 
         if self.rollback_active:
-            encoded_frame = (
-                self.encode_frame(
-                    frame
-                )
+            target_timestamp = (
+                self.event_timestamp
+                + Config.POST_SECONDS
             )
 
-            if encoded_frame is not None:
-                self.post_frames.append(
-                    encoded_frame
-                )
-
-            elapsed = (
-                time.time()
-                - self.rollback_start_time
+            latest_timestamp = (
+                self.buffer.get_latest_timestamp()
             )
 
             if (
-                elapsed
-                >= Config.POST_SECONDS
+                latest_timestamp is not None
+                and latest_timestamp >= target_timestamp
             ):
-                self.finish_rollback()
+                self.finish_rollback(
+                    target_timestamp
+                )
 
     def start(self):
         self.running = True
 
+        Config.reload()
+        self.settings = Settings.load()
+
         self.camera.start()
         self.button.start()
         self.audio_source.start()
-
         self.hardware.start()
 
         self.logger.info(
@@ -158,19 +204,16 @@ class LifeReplaySystem:
         if not self.running:
             return
 
+        self.reload_settings()
+
         self.process_audio()
 
         frame = self.camera.read()
 
         if frame is not None:
-            self.process_frame(
-                frame
-            )
+            self.process_frame(frame)
 
-        keyboard_pressed = (
-            self.button.is_pressed()
-        )
-
+        keyboard_pressed = self.button.is_pressed()
         hardware_pressed = (
             self.hardware.is_button_pressed()
         )
@@ -181,6 +224,7 @@ class LifeReplaySystem:
                 or hardware_pressed
             )
             and not self.rollback_active
+            and not self.saving_replay
         ):
             self.start_rollback()
 
@@ -188,11 +232,26 @@ class LifeReplaySystem:
         if self.rollback_active:
             return
 
+        if self.saving_replay:
+            self.logger.info(
+                "Rollback ignored: "
+                "previous replay is still being saved"
+            )
+            return
+
+        if not Settings.load().get(
+            "replay_buffer_enabled",
+            True
+        ):
+            self.logger.info(
+                "Rollback ignored: "
+                "replay buffer disabled"
+            )
+            return
+
         self.rollback_active = True
 
-        self.event_timestamp = (
-            time.time()
-        )
+        self.event_timestamp = time.time()
 
         self.rollback_start_time = (
             self.event_timestamp
@@ -224,10 +283,7 @@ class LifeReplaySystem:
             f"event={self.event_timestamp:.6f}"
         )
 
-    def _get_audio_pre_chunks(
-        self,
-        timestamp
-    ):
+    def _get_audio_pre_chunks(self, timestamp):
         start_time = (
             timestamp
             - Config.PRE_SECONDS
@@ -254,9 +310,22 @@ class LifeReplaySystem:
 
         return chunks
 
-    def finish_rollback(self):
+    def finish_rollback(
+        self,
+        target_timestamp=None
+    ):
         if not self.rollback_active:
             return
+
+        if target_timestamp is None:
+            target_timestamp = time.time()
+
+        self.post_frames = (
+            self.buffer.get_frames_between(
+                self.event_timestamp,
+                target_timestamp
+            )
+        )
 
         self.logger.info(
             f"Rollback finished: "
@@ -270,23 +339,76 @@ class LifeReplaySystem:
             f"post audio chunks"
         )
 
+        # Make independent copies before handing the data
+        # to the background saving thread.
+        pre_frames = list(self.pre_frames)
+        post_frames = list(self.post_frames)
+        pre_audio_chunks = list(self.pre_audio_chunks)
+        post_audio_chunks = list(self.post_audio_chunks)
+
+        pre_seconds = Config.PRE_SECONDS
+        post_seconds = Config.POST_SECONDS
+
         self.hardware.set_rollback_finished_state()
 
+        # Reset rollback state immediately.
+        # The camera must NOT wait for FFmpeg.
+        self.pre_frames = []
+        self.post_frames = []
+        self.pre_audio_chunks = []
+        self.post_audio_chunks = []
+
+        self.rollback_active = False
+        self.rollback_start_time = None
+        self.event_timestamp = None
+
+        self.saving_replay = True
+
+        self.logger.info(
+            "Replay captured. "
+            "Starting background MP4 save..."
+        )
+
+        save_thread = threading.Thread(
+            target=self._save_replay_worker,
+            args=(
+                pre_frames,
+                post_frames,
+                pre_audio_chunks,
+                post_audio_chunks,
+                pre_seconds,
+                post_seconds,
+            ),
+            name="ReplaySaveWorker",
+            daemon=True,
+        )
+
+        save_thread.start()
+
+    def _save_replay_worker(
+        self,
+        pre_frames,
+        post_frames,
+        pre_audio_chunks,
+        post_audio_chunks,
+        pre_seconds,
+        post_seconds,
+    ):
         try:
             replay = (
                 self.replay_manager.save_encoded_av_replay(
-                    self.pre_frames,
-                    self.post_frames,
-                    self.pre_audio_chunks,
-                    self.post_audio_chunks,
-                    Config.PRE_SECONDS,
-                    Config.POST_SECONDS
+                    pre_frames,
+                    post_frames,
+                    pre_audio_chunks,
+                    post_audio_chunks,
+                    pre_seconds,
+                    post_seconds
                 )
             )
 
             if replay:
                 self.logger.info(
-                    f"Replay saved successfully: "
+                    f"Background replay save completed: "
                     f"{replay.file_path}"
                 )
 
@@ -294,29 +416,21 @@ class LifeReplaySystem:
 
             else:
                 self.logger.error(
-                    "Replay save failed"
+                    "Background replay save failed"
                 )
 
                 self.hardware.set_error_state()
 
         except Exception as error:
             self.logger.error(
-                f"Replay save exception: "
+                f"Background replay save exception: "
                 f"{error}"
             )
 
             self.hardware.set_error_state()
 
         finally:
-            self.pre_frames = []
-            self.post_frames = []
-
-            self.pre_audio_chunks = []
-            self.post_audio_chunks = []
-
-            self.rollback_active = False
-            self.rollback_start_time = None
-            self.event_timestamp = None
+            self.saving_replay = False
 
     def stop(self):
         self.running = False
@@ -327,9 +441,11 @@ class LifeReplaySystem:
             self.camera.stop()
 
         self.audio_source.stop()
-
         self.hardware.stop()
+
+        self.buffer.close()
 
         self.logger.info(
             "LifeReplay system stopped"
         )
+

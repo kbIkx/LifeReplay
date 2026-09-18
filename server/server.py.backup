@@ -6,11 +6,8 @@ from flask import (
     Flask,
     jsonify,
     send_file,
-    Response,
-    request
+    Response
 )
-
-from config.settings import Settings
 
 from core.replay_service import ReplayService
 from storage.replay_manager import ReplayManager
@@ -61,81 +58,10 @@ def get_replay_path(replay):
 @app.route("/api/status")
 def status():
 
-    settings = Settings.load()
-
     return jsonify(
         {
             "name": "LifeReplay",
-            "status": "online",
-            "camera_width": settings[
-                "camera_width"
-            ],
-            "camera_height": settings[
-                "camera_height"
-            ],
-            "camera_fps": settings[
-                "camera_fps"
-            ]
-        }
-    )
-
-
-@app.route("/api/settings", methods=["GET"])
-def get_settings():
-
-    return jsonify(
-        Settings.load()
-    )
-
-
-@app.route("/api/settings", methods=["PUT"])
-def update_settings():
-
-    data = request.get_json(
-        silent=True
-    )
-
-    if not isinstance(data, dict):
-
-        return jsonify(
-            {
-                "error": "Request body must be a JSON object"
-            }
-        ), 400
-
-    try:
-
-        settings = Settings.update(
-            data
-        )
-
-    except (
-        ValueError,
-        TypeError,
-        KeyError
-    ) as error:
-
-        return jsonify(
-            {
-                "error": str(error)
-            }
-        ), 400
-
-    except Exception as error:
-
-        return jsonify(
-            {
-                "error": (
-                    "Failed to save settings: "
-                    f"{error}"
-                )
-            }
-        ), 500
-
-    return jsonify(
-        {
-            "success": True,
-            "settings": settings
+            "status": "online"
         }
     )
 

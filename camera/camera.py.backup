@@ -24,9 +24,6 @@ class Camera:
                         Config.CAMERA_HEIGHT
                     ),
                     "format": "RGB888"
-                },
-                controls={
-                    "FrameRate": Config.CAMERA_FPS
                 }
             )
 
@@ -45,12 +42,6 @@ class Camera:
                 f"Camera failed to start: {error}"
             )
 
-            if self.camera is not None:
-                try:
-                    self.camera.close()
-                except Exception:
-                    pass
-
             self.camera = None
 
             raise
@@ -62,6 +53,7 @@ class Camera:
         try:
             frame = self.camera.capture_array()
 
+            # Picamera2 gives RGB, OpenCV expects BGR.
             frame = cv2.cvtColor(
                 frame,
                 cv2.COLOR_RGB2BGR
@@ -75,14 +67,6 @@ class Camera:
             )
 
             return None
-
-    def restart(self):
-        self.logger.info(
-            "Restarting camera with new settings"
-        )
-
-        self.stop()
-        self.start()
 
     def stop(self):
         if self.camera is not None:
