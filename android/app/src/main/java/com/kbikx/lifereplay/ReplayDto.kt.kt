@@ -18,5 +18,22 @@ data class ReplayDto(
     val frameCount: Int,
 
     @SerializedName("duration_seconds")
-    val durationSeconds: Double
+    val durationSeconds: Double,
+
+    @SerializedName("file_size_bytes")
+    val fileSizeBytes: Long,
+
+    val width: Int,
+
+    val height: Int,
+
+    val fps: Double,
+
+    val audio: Boolean,
+
+    @SerializedName("audio_sample_rate")
+    val audioSampleRate: Int,
+
+    @SerializedName("audio_channels")
+    val audioChannels: Int
 )
