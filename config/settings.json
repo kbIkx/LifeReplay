@@ -1,10 +1,10 @@
 {
-    "camera_width": 1296,
-    "camera_height": 972,
+    "camera_width": 640,
+    "camera_height": 480,
     "camera_fps": 30,
-    "buffer_seconds": 10,
-    "pre_seconds": 2,
-    "post_seconds": 3,
+    "buffer_seconds": 40,
+    "pre_seconds": 40,
+    "post_seconds": 20,
     "replay_buffer_enabled": true,
     "auto_delete": false,
     "storage_limit_mb": 1024

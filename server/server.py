@@ -132,12 +132,7 @@ def update_settings():
             }
         ), 500
 
-    return jsonify(
-        {
-            "success": True,
-            "settings": settings
-        }
-    )
+    return jsonify(settings)
 
 
 @app.route("/api/replays")

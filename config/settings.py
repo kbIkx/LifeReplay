@@ -13,7 +13,7 @@ class Settings:
         "camera_height": 480,
         "camera_fps": 30,
 
-        "buffer_seconds": 10,
+        "buffer_seconds": 40,
         "pre_seconds": 10,
         "post_seconds": 5,
 
@@ -82,19 +82,10 @@ class Settings:
         height = int(settings["camera_height"])
         fps = int(settings["camera_fps"])
 
-        buffer_seconds = int(
-            settings["buffer_seconds"]
-        )
-        pre_seconds = int(
-            settings["pre_seconds"]
-        )
-        post_seconds = int(
-            settings["post_seconds"]
-        )
-
-        storage_limit_mb = int(
-            settings["storage_limit_mb"]
-        )
+        buffer_seconds = int(settings["buffer_seconds"])
+        pre_seconds = int(settings["pre_seconds"])
+        post_seconds = int(settings["post_seconds"])
+        storage_limit_mb = int(settings["storage_limit_mb"])
 
         valid_resolutions = {
             (640, 480),
@@ -113,9 +104,9 @@ class Settings:
                 "FPS must be between 1 and 60"
             )
 
-        if buffer_seconds < 1:
+        if buffer_seconds < 40:
             raise ValueError(
-                "Buffer duration must be at least 1 second"
+                "Buffer duration must be at least 40 seconds"
             )
 
         if pre_seconds < 0:
@@ -123,14 +114,24 @@ class Settings:
                 "PRE seconds cannot be negative"
             )
 
-        if post_seconds < 0:
+        if pre_seconds > 40:
             raise ValueError(
-                "POST seconds cannot be negative"
+                "PRE seconds cannot exceed 40 seconds"
             )
 
         if pre_seconds > buffer_seconds:
             raise ValueError(
                 "PRE seconds cannot exceed buffer duration"
+            )
+
+        if post_seconds < 0:
+            raise ValueError(
+                "POST seconds cannot be negative"
+            )
+
+        if post_seconds > 20:
+            raise ValueError(
+                "POST seconds cannot exceed 20 seconds"
             )
 
         if storage_limit_mb < 100:
@@ -149,9 +150,11 @@ class Settings:
         settings["camera_width"] = width
         settings["camera_height"] = height
         settings["camera_fps"] = fps
+
         settings["buffer_seconds"] = buffer_seconds
         settings["pre_seconds"] = pre_seconds
         settings["post_seconds"] = post_seconds
+
         settings["storage_limit_mb"] = storage_limit_mb
 
 
