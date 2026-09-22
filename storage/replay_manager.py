@@ -5,6 +5,7 @@ import time
 import uuid
 import subprocess
 import tempfile
+import wave
 
 import cv2
 import numpy as np
@@ -204,6 +205,14 @@ class ReplayManager:
         if encoded_frame is None:
             return None
 
+        # New timestamp-aware format:
+        # (capture_timestamp, jpeg_bytes)
+        if (
+            isinstance(encoded_frame, tuple)
+            and len(encoded_frame) == 2
+        ):
+            encoded_frame = encoded_frame[1]
+
         try:
             array = np.frombuffer(
                 encoded_frame,
@@ -224,7 +233,6 @@ class ReplayManager:
             )
 
             return None
-
     def _write_mp4(
         self,
         file_path,
@@ -415,10 +423,26 @@ class ReplayManager:
         height,
         fps
     ):
+        all_frames = (
+            list(pre_frames)
+            + list(post_frames)
+        )
+
         all_audio_chunks = (
             list(pre_audio_chunks)
             + list(post_audio_chunks)
         )
+
+        if not all_frames:
+            self.logger.error(
+                "Cannot create A/V replay "
+                "without video frames"
+            )
+
+            return (
+                0,
+                0
+            )
 
         if not all_audio_chunks:
             self.logger.error(
@@ -428,8 +452,268 @@ class ReplayManager:
 
             return (
                 0,
-                len(pre_frames) + len(post_frames)
+                len(all_frames)
             )
+
+        # Keep frames in capture-time order.
+        # ReplayBuffer normally already provides this order,
+        # but workers can finish JPEG encoding in different order.
+        timestamped_frames = [
+            frame
+            for frame in all_frames
+            if (
+                isinstance(frame, tuple)
+                and len(frame) == 2
+            )
+        ]
+
+        if timestamped_frames:
+            all_frames.sort(
+                key=lambda item: item[0]
+                if (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                )
+                else float("inf")
+            )
+
+        # First video capture timestamp becomes our A/V time zero.
+        video_start_timestamp = None
+
+        if all_frames:
+            first_frame_item = all_frames[0]
+
+            if (
+                isinstance(first_frame_item, tuple)
+                and len(first_frame_item) == 2
+            ):
+                video_start_timestamp = (
+                    first_frame_item[0]
+                )
+
+        # Keep audio in timestamp order as well.
+        timestamped_audio = [
+            chunk
+            for chunk in all_audio_chunks
+            if (
+                isinstance(chunk, tuple)
+                and len(chunk) == 2
+            )
+        ]
+
+        if timestamped_audio:
+            all_audio_chunks.sort(
+                key=lambda item: item[0]
+                if (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                )
+                else float("inf")
+            )
+
+        # If timestamps are unavailable, preserve backward compatibility.
+        # In the current LifeReplay pipeline timestamps are always present.
+        if video_start_timestamp is None:
+            first_audio = all_audio_chunks[0]
+
+            if (
+                isinstance(first_audio, tuple)
+                and len(first_audio) == 2
+            ):
+                video_start_timestamp = first_audio[0]
+            else:
+                video_start_timestamp = time.time()
+
+            self.logger.warning(
+                "A/V replay has no video timestamps; "
+                "using audio timestamp as reference"
+            )
+
+        video_duration = (
+            len(all_frames) / fps
+            if fps > 0
+            else 0
+        )
+
+        if video_duration <= 0:
+            self.logger.error(
+                "Invalid A/V video duration"
+            )
+
+            return (
+                0,
+                len(all_frames)
+            )
+
+        # ---------------------------------------------------------
+        # Build a timestamp-aligned WAV.
+        #
+        # The first audio timestamp is compared with the first
+        # video timestamp. If audio starts later, silence is added.
+        # If audio starts earlier, the leading samples are trimmed.
+        #
+        # After alignment, the WAV is exactly the expected CFR
+        # video duration. This makes FFmpeg's -shortest a safety
+        # mechanism instead of the thing deciding A/V duration.
+        # ---------------------------------------------------------
+
+        sample_rate = 16000
+        channels = 1
+        sample_width = 2
+        bytes_per_sample = (
+            channels * sample_width
+        )
+
+        total_samples = int(
+            round(
+                video_duration
+                * sample_rate
+            )
+        )
+
+        if total_samples <= 0:
+            self.logger.error(
+                "Invalid target audio sample count"
+            )
+
+            return (
+                0,
+                len(all_frames)
+            )
+
+        aligned_audio = bytearray(
+            total_samples
+            * bytes_per_sample
+        )
+
+        first_audio_timestamp = None
+
+        for audio_chunk in all_audio_chunks:
+            if (
+                isinstance(audio_chunk, tuple)
+                and len(audio_chunk) == 2
+            ):
+                timestamp, pcm_data = audio_chunk
+            else:
+                # Legacy raw PCM chunk without timestamp.
+                if first_audio_timestamp is None:
+                    first_audio_timestamp = (
+                        video_start_timestamp
+                    )
+
+                timestamp = (
+                    first_audio_timestamp
+                )
+                pcm_data = audio_chunk
+
+            if pcm_data is None:
+                continue
+
+            if not isinstance(
+                pcm_data,
+                (bytes, bytearray)
+            ):
+                continue
+
+            if len(pcm_data) == 0:
+                continue
+
+            if first_audio_timestamp is None:
+                first_audio_timestamp = timestamp
+
+            # Number of samples from the beginning of the video
+            # until this audio chunk starts.
+            offset_samples = int(
+                round(
+                    (
+                        timestamp
+                        - video_start_timestamp
+                    )
+                    * sample_rate
+                )
+            )
+
+            source_start_sample = 0
+
+            # Audio begins before the first video frame.
+            if offset_samples < 0:
+                source_start_sample = (
+                    -offset_samples
+                )
+                offset_samples = 0
+
+            chunk_sample_count = (
+                len(pcm_data)
+                // bytes_per_sample
+            )
+
+            if chunk_sample_count <= source_start_sample:
+                continue
+
+            if offset_samples >= total_samples:
+                continue
+
+            available_samples = (
+                total_samples
+                - offset_samples
+            )
+
+            copy_sample_count = min(
+                chunk_sample_count
+                - source_start_sample,
+                available_samples
+            )
+
+            if copy_sample_count <= 0:
+                continue
+
+            source_start_byte = (
+                source_start_sample
+                * bytes_per_sample
+            )
+
+            destination_start_byte = (
+                offset_samples
+                * bytes_per_sample
+            )
+
+            copy_byte_count = (
+                copy_sample_count
+                * bytes_per_sample
+            )
+
+            aligned_audio[
+                destination_start_byte:
+                destination_start_byte
+                + copy_byte_count
+            ] = pcm_data[
+                source_start_byte:
+                source_start_byte
+                + copy_byte_count
+            ]
+
+        if first_audio_timestamp is None:
+            self.logger.error(
+                "No valid audio timestamps/chunks found"
+            )
+
+            return (
+                0,
+                len(all_frames)
+            )
+
+        audio_offset = (
+            first_audio_timestamp
+            - video_start_timestamp
+        )
+
+        self.logger.info(
+            "A/V timestamp alignment: "
+            f"video_start={video_start_timestamp:.6f}, "
+            f"audio_start={first_audio_timestamp:.6f}, "
+            f"audio_offset={audio_offset:+.6f}s, "
+            f"video_duration={video_duration:.6f}s"
+        )
 
         temp_wav_path = None
 
@@ -442,23 +726,36 @@ class ReplayManager:
                     temp_file.name
                 )
 
-            wav_ok = WavWriter.write(
-                temp_wav_path,
-                all_audio_chunks,
-                sample_rate=16000,
-                channels=1,
-                sample_width=2
-            )
+            try:
+                with wave.open(
+                    temp_wav_path,
+                    "wb"
+                ) as wav_file:
+                    wav_file.setnchannels(
+                        channels
+                    )
 
-            if not wav_ok:
+                    wav_file.setsampwidth(
+                        sample_width
+                    )
+
+                    wav_file.setframerate(
+                        sample_rate
+                    )
+
+                    wav_file.writeframes(
+                        aligned_audio
+                    )
+
+            except Exception as error:
                 self.logger.error(
-                    "Failed to create "
-                    "temporary WAV"
+                    f"Failed to create aligned WAV: "
+                    f"{error}"
                 )
 
                 return (
                     0,
-                    len(pre_frames) + len(post_frames)
+                    len(all_frames)
                 )
 
             command = [
@@ -501,6 +798,9 @@ class ReplayManager:
                 "-ac",
                 "1",
 
+                "-t",
+                f"{video_duration:.6f}",
+
                 "-shortest",
 
                 "-movflags",
@@ -510,8 +810,8 @@ class ReplayManager:
             ]
 
             self.logger.info(
-                "Using direct JPEG/MJPEG "
-                "FFmpeg input"
+                "Using timestamp-aligned "
+                "JPEG/MJPEG + WAV FFmpeg input"
             )
 
             try:
@@ -530,7 +830,7 @@ class ReplayManager:
 
                 return (
                     0,
-                    len(pre_frames) + len(post_frames)
+                    len(all_frames)
                 )
 
             written_frame_count = 0
@@ -538,19 +838,30 @@ class ReplayManager:
 
             pipe_time = 0.0
 
-            all_frames = (
-                list(pre_frames)
-                + list(post_frames)
-            )
-
             try:
-                for encoded_frame in all_frames:
+                for frame_item in all_frames:
+                    if frame_item is None:
+                        failed_frame_count += 1
+                        continue
+
+                    if (
+                        isinstance(frame_item, tuple)
+                        and len(frame_item) == 2
+                    ):
+                        encoded_frame = (
+                            frame_item[1]
+                        )
+                    else:
+                        encoded_frame = frame_item
+
                     if not encoded_frame:
                         failed_frame_count += 1
                         continue
 
                     try:
-                        pipe_start = time.perf_counter()
+                        pipe_start = (
+                            time.perf_counter()
+                        )
 
                         process.stdin.write(
                             encoded_frame
@@ -583,7 +894,9 @@ class ReplayManager:
                     except OSError:
                         pass
 
-            finalize_start = time.perf_counter()
+            finalize_start = (
+                time.perf_counter()
+            )
 
             stderr_output = (
                 process.stderr.read()
@@ -591,9 +904,7 @@ class ReplayManager:
                 else b""
             )
 
-            return_code = (
-                process.wait()
-            )
+            return_code = process.wait()
 
             finalize_time = (
                 time.perf_counter()
@@ -637,8 +948,15 @@ class ReplayManager:
 
                 return (
                     0,
-                    len(pre_frames) + len(post_frames)
+                    len(all_frames)
                 )
+
+            self.logger.info(
+                "A/V replay written: "
+                f"frames={written_frame_count}, "
+                f"failed={failed_frame_count}, "
+                f"audio_samples={total_samples}"
+            )
 
             return (
                 written_frame_count,
@@ -662,7 +980,6 @@ class ReplayManager:
                         f"temporary WAV: "
                         f"{temp_wav_path}"
                     )
-
     def save_encoded_replay(
         self,
         pre_frames,

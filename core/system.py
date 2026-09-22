@@ -63,7 +63,6 @@ class LifeReplaySystem:
         if new_settings == self.settings:
             return
 
-        # Don't apply settings in the middle of a rollback.
         if self.rollback_active:
             self.logger.info(
                 "Settings changed during rollback; "
@@ -257,9 +256,15 @@ class LifeReplaySystem:
             self.event_timestamp
         )
 
+        pre_start_timestamp = (
+            self.event_timestamp
+            - Config.PRE_SECONDS
+        )
+
         self.pre_frames = (
-            self.buffer.get_recent_frames(
-                Config.PRE_SECONDS
+            self.buffer.get_frames_between_with_timestamps(
+                pre_start_timestamp,
+                self.event_timestamp
             )
         )
 
@@ -289,26 +294,10 @@ class LifeReplaySystem:
             - Config.PRE_SECONDS
         )
 
-        chunks = []
-
-        for (
-            chunk_timestamp,
-            pcm_data
-        ) in self.audio_buffer.get_chunks():
-
-            if (
-                start_time
-                <= chunk_timestamp
-                <= timestamp
-            ):
-                chunks.append(
-                    (
-                        chunk_timestamp,
-                        pcm_data
-                    )
-                )
-
-        return chunks
+        return self.audio_buffer.get_chunks_between(
+            start_time,
+            timestamp
+        )
 
     def finish_rollback(
         self,
@@ -321,7 +310,7 @@ class LifeReplaySystem:
             target_timestamp = time.time()
 
         self.post_frames = (
-            self.buffer.get_frames_between(
+            self.buffer.get_frames_between_with_timestamps(
                 self.event_timestamp,
                 target_timestamp
             )
@@ -339,8 +328,6 @@ class LifeReplaySystem:
             f"post audio chunks"
         )
 
-        # Make independent copies before handing the data
-        # to the background saving thread.
         pre_frames = list(self.pre_frames)
         post_frames = list(self.post_frames)
         pre_audio_chunks = list(self.pre_audio_chunks)
@@ -351,8 +338,6 @@ class LifeReplaySystem:
 
         self.hardware.set_rollback_finished_state()
 
-        # Reset rollback state immediately.
-        # The camera must NOT wait for FFmpeg.
         self.pre_frames = []
         self.post_frames = []
         self.pre_audio_chunks = []
@@ -448,4 +433,3 @@ class LifeReplaySystem:
         self.logger.info(
             "LifeReplay system stopped"
         )
-

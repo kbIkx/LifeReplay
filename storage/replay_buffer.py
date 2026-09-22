@@ -134,17 +134,19 @@ class ReplayBuffer:
 
     def get_recent_frames(self, seconds):
         current_time = time.time()
-        cutoff = current_time - seconds
 
-        with self._buffer_lock:
-            self._cleanup_locked(current_time)
+        return self.get_frames_between(
+            current_time - seconds,
+            current_time,
+        )
 
-            return [
-                encoded_frame
-                for timestamp, encoded_frame
-                in self.buffer
-                if timestamp >= cutoff
-            ]
+    def get_recent_frames_with_timestamps(self, seconds):
+        current_time = time.time()
+
+        return self.get_frames_between_with_timestamps(
+            current_time - seconds,
+            current_time,
+        )
 
     def get_latest_timestamp(self):
         with self._buffer_lock:
@@ -165,6 +167,30 @@ class ReplayBuffer:
 
             return [
                 encoded_frame
+                for timestamp, encoded_frame
+                in self.buffer
+                if (
+                    start_timestamp
+                    <= timestamp
+                    <= end_timestamp
+                )
+            ]
+
+    def get_frames_between_with_timestamps(
+        self,
+        start_timestamp,
+        end_timestamp,
+    ):
+        with self._buffer_lock:
+            self._cleanup_locked(
+                time.time()
+            )
+
+            return [
+                (
+                    timestamp,
+                    encoded_frame,
+                )
                 for timestamp, encoded_frame
                 in self.buffer
                 if (
